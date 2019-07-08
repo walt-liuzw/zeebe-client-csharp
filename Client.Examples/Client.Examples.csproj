@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Program1.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="Resources\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
@@ -23,6 +27,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Client\Client.csproj" />
+    <ProjectReference Include="..\WarehouseService\WarehouseService.csproj" />
   </ItemGroup>
 
   <ItemGroup>

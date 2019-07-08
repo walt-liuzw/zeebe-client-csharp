@@ -14,9 +14,11 @@
 //    limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using Zeebe.Client;
 using Zeebe.Client.Api.Clients;
 using Zeebe.Client.Api.Responses;
@@ -27,78 +29,113 @@ namespace Client.Examples
     {
         private static readonly string DemoProcessPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "demo-process.bpmn");
         private static readonly string ZeebeUrl = "127.0.0.1:26500";
-        private static readonly string WorkflowInstanceVariables = "{\"a\":\"123\"}";
-        private static readonly string JobType = "foo";
-        private static readonly string WorkerName = Environment.MachineName;
-        private static readonly long WORK_COUNT = 100L;
+        private static readonly long WORK_COUNT = 2L;
+
+        //private static string WorkflowInstanceVariables =
+        //    "{\"orderId\":\"e895b984-8677-4ff2-be7a-037e253f1e08\",\"amount_instance\":\"30\",\"func_instance\":\"collect money for your orders\"}";
+        private static IZeebeClient _client;
 
         public static async Task Main(string[] args)
         {
             // create zeebe client
-            var client = ZeebeClient.NewZeebeClient(ZeebeUrl);
-
-
-            await client.NewPublishMessageCommand().MessageName("csharp").CorrelationKey("wow").Variables("{\"realValue\":2}").Send();
-
+            _client = ZeebeClient.NewZeebeClient(ZeebeUrl);
             // deploy
-            var deployResponse = await client.NewDeployCommand().AddResourceFile(DemoProcessPath).Send();
-
+            var deployResponse = await _client.NewDeployCommand().AddResourceFile(DemoProcessPath).Send();
             // create workflow instance
             var workflowKey = deployResponse.Workflows[0].WorkflowKey;
 
-            var workflowInstance = await client
-                .NewCreateWorkflowInstanceCommand()
-                .WorkflowKey(workflowKey)
-                .Variables(WorkflowInstanceVariables)
-                .Send();
-
-            await client.NewSetVariablesCommand(workflowInstance.WorkflowInstanceKey).Variables("{\"wow\":\"this\"}").Local().Send();
-
-            for (var i = 0; i < WORK_COUNT; i++)
-            {
-                await client
-                    .NewCreateWorkflowInstanceCommand()
-                    .WorkflowKey(workflowKey)
-                    .Variables(WorkflowInstanceVariables)
-                    .Send();
-            }
-
+            // 客户端生成多个流程数据
+            await GenerateMultiFlowInstances(workflowKey);
+            //await _client.NewSetVariablesCommand(workflowInstance.WorkflowInstanceKey).Variables("{\"func_instance\":\"collect money for your orders\"}").Local().Send();
+            
             // open job worker
             using (var signal = new EventWaitHandle(false, EventResetMode.AutoReset))
             {
-                client.NewWorker()
-                      .JobType(JobType)
-                      .Handler(HandleJob)
-                      .MaxJobsActive(5)
-                      .Name(WorkerName)
-                      .AutoCompletion()
-                      .PollInterval(TimeSpan.FromSeconds(1))
-                      .Timeout(TimeSpan.FromSeconds(10))
-                      .Open();
-
+                _client.NewWorker()
+                    .JobType("collectmoney")
+                    .Handler(HandleJob)
+                    .MaxJobsActive(5)
+                    .Name("collectmoney")
+                    .AutoCompletion()
+                    .PollInterval(TimeSpan.FromSeconds(1))
+                    .Timeout(TimeSpan.FromSeconds(10))
+                    .Open();
+                _client.NewWorker()
+                    .JobType("fetchitems")
+                    .Handler(HandleJob)
+                    .MaxJobsActive(5)
+                    .Name("fetchitems")
+                    .AutoCompletion()
+                    .PollInterval(TimeSpan.FromSeconds(1))
+                    .Timeout(TimeSpan.FromSeconds(10))
+                    .Open();
+                _client.NewWorker()
+                    .JobType("shipparcel")
+                    .Handler(HandleJob)
+                    .MaxJobsActive(5)
+                    .Name("shipparcel")
+                    .AutoCompletion()
+                    .PollInterval(TimeSpan.FromSeconds(1))
+                    .Timeout(TimeSpan.FromSeconds(10))
+                    .Open();
                 // blocks main thread, so that worker can run
-                signal.WaitOne();
+                WaitHandle.WaitAll(new WaitHandle[]
+                {
+                    signal
+                });
+            }
+
+        }
+
+        private static  async Task GenerateMultiFlowInstances(long workflowKey)
+        {
+            for (var i = 0; i < WORK_COUNT; i++)
+            {
+                var variables = new
+                {
+                    orderId = $"{DateTime.Now.Ticks}-{i}",
+                    amount_instance = 20+i,
+                    func_instance = "collect money for your orders"
+                };
+                await _client
+                    .NewCreateWorkflowInstanceCommand()
+                   
+                    .WorkflowKey(workflowKey)
+                    .Variables(JsonConvert.SerializeObject(variables))
+                    .Send();
             }
         }
 
         private static void HandleJob(IJobClient jobClient, IJob job)
         {
             // business logic
-            var jobKey = job.Key;
-            Console.WriteLine("Handling job: " + job);
+            var variables = JsonConvert.DeserializeObject<Dictionary<string, object>>(job.Variables);
+            switch (job.Type)
+            {
+                case "collectmoney":
+                    string message = $"you have a order to pay! amount_job:{variables["amount_job"]}";
+                    Console.WriteLine($"OrderId:{variables["orderId"]},Function:{variables["func_job"]},message:{message}");
+                    var variablesObject = new
+                    {
+                        func_job= "handle stock and prepare delivery",
+                        amount_job = Convert.ToInt32(variables["amount_job"])+50
+                    };
+                    jobClient.NewCompleteJobCommand(job).Variables(JsonConvert.SerializeObject(variablesObject)).Send();
+                    break;
+                case "fetchitems":
+                    message = $"you should prepare cargoes! amount updated is:{variables["amount_job"]}";
+                    Console.WriteLine($"OrderId:{variables["orderId"]},Function:{variables["func_job"]},message:{message}");
+                    jobClient.NewCompleteJobCommand(job).Variables("{\"func_job\":\"handle delivery and so on\"}").Send();
+                    break;
+                case "shipparcel":
+                    Console.WriteLine($"OrderId:{variables["orderId"]},Function:{variables["func_job"]}");
+                    jobClient.NewCompleteJobCommand(job).Send();
+                    break;
+                default:
+                    Console.WriteLine($"OrderId:{variables["orderId"]},Function:default");
+                    break;
+            }
 
-            if (jobKey % 3 == 0)
-            {
-                jobClient.NewCompleteJobCommand(jobKey).Variables("{\"foo\":2}").Send();
-            }
-            else if (jobKey % 2 == 0)
-            {
-                jobClient.NewFailCommand(jobKey).Retries(job.Retries - 1).ErrorMessage("Example fail").Send();
-            }
-            else
-            {
-                // auto completion
-            }
         }
     }
 }
